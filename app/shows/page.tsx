@@ -1,4 +1,4 @@
-import { getAllShows } from "@/lib/queries";
+import { getAllShows, getConfirmationsForDeals, aggregateConfirmationStatus } from "@/lib/queries";
 import {
   formatMoneyCompact,
   formatShowDate,
@@ -10,8 +10,16 @@ import type { ShowRow } from "./shows-list";
 
 export default async function ShowsPage() {
   const rows = await getAllShows();
-
   const reversed = [...rows].reverse();
+
+  // Confirmation status per deal
+  const dealIds = reversed.filter(r => r.deal?.id).map(r => r.deal!.id);
+  const allConfirmations = await getConfirmationsForDeals(dealIds);
+  const confirmsByDealId = new Map<string, typeof allConfirmations>();
+  for (const c of allConfirmations) {
+    if (!confirmsByDealId.has(c.dealId)) confirmsByDealId.set(c.dealId, []);
+    confirmsByDealId.get(c.dealId)!.push(c);
+  }
 
   const settledCount = reversed.filter((r) => r.settlement).length;
   const disputedCount = reversed.filter(
@@ -22,39 +30,33 @@ export default async function ShowsPage() {
     0,
   );
 
-  const serialized: ShowRow[] = reversed.map(({ show, artist, deal, settlement }) => ({
-    show: {
-      id: show.id,
-      status: show.status as
-        | "booked"
-        | "advanced"
-        | "day_of"
-        | "settled"
-        | "closed",
-    },
-    artist: artist ? { name: artist.name } : null,
-    deal: deal
-      ? {
-          dealType: deal.dealType,
-          guaranteeFormatted:
-            deal.guaranteeAmount != null
-              ? formatMoneyCompact(deal.guaranteeAmount)
-              : null,
-        }
-      : null,
-    settlement: settlement
-      ? {
-          totalFormatted:
-            settlement.totalToArtist != null
-              ? formatMoneyCompact(settlement.totalToArtist)
-              : null,
-          status: settlement.status,
-        }
-      : null,
-    dateFormatted: formatShowDate(show.date),
-    dateRelative: relativeShowDate(show.date),
-    month: formatShowMonth(show.date),
-  }));
+  const serialized: ShowRow[] = reversed.map(({ show, artist, deal, settlement }) => {
+    const dealConfs = deal ? (confirmsByDealId.get(deal.id) ?? []) : [];
+    const confirmStatus = deal ? aggregateConfirmationStatus(dealConfs, deal.dealVersion) : "not_sent";
+    return {
+      show: {
+        id: show.id,
+        status: show.status as "booked" | "advanced" | "day_of" | "settled" | "closed",
+      },
+      artist: artist ? { name: artist.name } : null,
+      deal: deal
+        ? {
+            dealType: deal.dealType,
+            guaranteeFormatted: deal.guaranteeAmount != null ? formatMoneyCompact(deal.guaranteeAmount) : null,
+          }
+        : null,
+      settlement: settlement
+        ? {
+            totalFormatted: settlement.totalToArtist != null ? formatMoneyCompact(settlement.totalToArtist) : null,
+            status: settlement.status,
+          }
+        : null,
+      dateFormatted: formatShowDate(show.date),
+      dateRelative: relativeShowDate(show.date),
+      month: formatShowMonth(show.date),
+      confirmation: confirmStatus === "not_sent" ? null : { status: confirmStatus },
+    };
+  });
 
   return (
     <div className="px-12 py-10 max-w-7xl">
@@ -69,7 +71,7 @@ export default async function ShowsPage() {
           Shows
         </h1>
         <p className="text-[14px] text-ink-500 mt-3 max-w-lg leading-relaxed">
-          Mariana&apos;s home view. {reversed.length} shows over 24 months.{" "}
+          Booker&apos;s home view. {reversed.length} shows over 24 months.{" "}
           {settledCount} settled
           {disputedCount > 0 && (
             <>, <span className="text-rose-700">{disputedCount} disputed</span></>

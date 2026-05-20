@@ -15,6 +15,7 @@ export type ShowRow = {
   dateFormatted: string;
   dateRelative: string;
   month: string;
+  confirmation: { status: "pending" | "confirmed" | "flagged" | "expired" } | null;
 };
 
 const lifecycleStatusVariants: Record<
@@ -188,10 +189,13 @@ function ShowListRow({ row }: { row: ShowRow }) {
           ) : null}
         </div>
 
-        <div className="flex justify-end">
+        <div className="flex flex-col items-end gap-1">
           {settlement ? (
             <SettlementPill status={settlement.status} />
           ) : null}
+          {row.confirmation && (
+            <ConfirmationBadge status={row.confirmation.status} />
+          )}
         </div>
 
         <ArrowUpRight className="h-3.5 w-3.5 text-ink-200 group-hover:text-ink-500 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 transition-all duration-150" />
@@ -206,4 +210,17 @@ function SettlementPill({ status }: { status: string }) {
     label: status,
   };
   return <PlainBadge variant={v.variant}>{v.label}</PlainBadge>;
+}
+
+function ConfirmationBadge({ status }: { status: "pending" | "confirmed" | "flagged" | "expired" }) {
+  switch (status) {
+    case "pending":
+      return <PlainBadge variant="sky">Awaiting</PlainBadge>;
+    case "confirmed":
+      return <PlainBadge variant="brand">Deal confirmed</PlainBadge>;
+    case "flagged":
+      return <PlainBadge variant="rose">Issue flagged</PlainBadge>;
+    case "expired":
+      return <PlainBadge variant="default">Confirmation expired</PlainBadge>;
+  }
 }
