@@ -123,7 +123,13 @@ export const deals = sqliteTable("deals", {
   hospitalityCap: real("hospitality_cap"),
 
   bonusesJson: text("bonuses_json"),
+  recoupsJson: text("recoups_json"),
   dealNotesFreetext: text("deal_notes_freetext"),
+  marketingRecoup: real("marketing_recoup"),
+  marketingRecoupTreatment: text("marketing_recoup_treatment", {
+    enum: ["in_cap", "separate"],
+  }),
+  dealVersion: integer("deal_version").notNull().default(1),
 
   createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
 });
@@ -281,6 +287,30 @@ export const settlements = sqliteTable("settlements", {
   notes: text("notes"),
 });
 
+// -------- Deal Confirmations --------
+
+export const dealConfirmations = sqliteTable("deal_confirmations", {
+  id: text("id").primaryKey(),
+  dealId: text("deal_id")
+    .notNull()
+    .references(() => deals.id),
+  dealVersion: integer("deal_version").notNull(),
+  recipientType: text("recipient_type", { enum: ["agent", "tm"] }).notNull(),
+  email: text("email").notNull(),
+  token: text("token").notNull().unique(),
+  tokenExpiresAt: integer("token_expires_at", { mode: "timestamp" }).notNull(),
+  status: text("status", {
+    enum: ["pending", "confirmed", "flagged", "expired", "invalidated"],
+  })
+    .notNull()
+    .default("pending"),
+  confirmedAt: integer("confirmed_at", { mode: "timestamp" }),
+  flaggedNotes: text("flagged_notes"),
+  reminderSentAt: integer("reminder_sent_at", { mode: "timestamp" }),
+  invalidatedAt: integer("invalidated_at", { mode: "timestamp" }),
+  sentAt: integer("sent_at", { mode: "timestamp" }).notNull(),
+});
+
 // -------- Type exports for convenience --------
 
 export type User = typeof users.$inferSelect;
@@ -294,6 +324,7 @@ export type TicketSale = typeof ticketSales.$inferSelect;
 export type Comp = typeof comps.$inferSelect;
 export type Expense = typeof expenses.$inferSelect;
 export type Settlement = typeof settlements.$inferSelect;
+export type DealConfirmation = typeof dealConfirmations.$inferSelect;
 
 // -------- Decoded JSON helpers --------
 
@@ -305,7 +336,8 @@ export type Bonus =
       amount: number;
       stacks?: boolean;
     }
-  | { type: "sellout"; label: string; amount: number }
+  | { type: "walk_pot"; label: string; threshold: number; percentage: number }
+  | { type: "sellout"; label: string; amount: number; selloutPct?: number }
   | {
       type: "attendance_threshold";
       label: string;
@@ -330,6 +362,22 @@ export type Recoup = {
   label: string;
   amount: number;
   status: "agreed" | "disputed" | "withdrawn";
+  treatment?: "in_pool" | "hard_deduct";
+};
+
+export type DealRecoupCategory =
+  | "marketing"
+  | "hospitality_overage"
+  | "production_overage"
+  | "prior_advance"
+  | "damages"
+  | "other";
+
+export type DealRecoup = {
+  category: DealRecoupCategory;
+  label: string;
+  amount: number;
+  treatment: "in_pool" | "hard_deduct";
 };
 
 export type SettlementStage = Settlement["status"];

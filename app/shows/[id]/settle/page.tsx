@@ -6,6 +6,7 @@ import {
   ArrowRight,
   Check,
   AlertTriangle,
+  AlertCircle,
   Mail,
   Pencil,
   XCircle,
@@ -22,12 +23,12 @@ import {
   Field,
 } from "@/components/ui/card";
 import { StatusBadge, DealTypeBadge, PlainBadge } from "@/components/ui/badge";
-import { calculateSettlement } from "@/lib/dealMath";
+import { calculateSettlement, parseBonuses } from "@/lib/dealMath";
 import {
   formatMoney,
   formatShowDateFull,
 } from "@/lib/format";
-import type { Settlement, Recoup } from "@/db/schema";
+import type { Settlement, Recoup, Deal } from "@/db/schema";
 import { Logomark } from "@/components/brand/logo";
 
 const RECOUP_LABELS: Record<Recoup["category"], string> = {
@@ -48,7 +49,7 @@ export default async function SettlePage({
   const data = await getShowById(id);
   if (!data) notFound();
 
-  const { show, artist, deal, ticketSales, expenses, settlement, recoups } =
+  const { show, artist, deal, ticketSales, expenses, comps, settlement, recoups } =
     data;
 
   if (!deal) {
@@ -66,6 +67,8 @@ export default async function SettlePage({
     deal,
     ticketSales,
     expenses,
+    comps,
+    recoups,
     venueCapacity: data.venue?.capacity ?? undefined,
   });
   const grossSoFar = ticketSales.reduce((sum, t) => sum + t.gross, 0);
@@ -139,7 +142,7 @@ export default async function SettlePage({
             expenseRowCount={expenses.length}
           />
         ) : (
-          <SupportedSettlement calc={calc} existingSettlement={settlement} />
+          <SupportedSettlement calc={calc} deal={deal} existingSettlement={settlement} />
         )}
 
         {recoups.length > 0 && <RecoupsSection recoups={recoups} />}
@@ -395,7 +398,7 @@ function UnsupportedDeal({
             The in-app tool can&apos;t settle a {friendly[dealType] ?? dealType} yet.
           </h2>
           <p className="text-[13px] text-ink-500 max-w-md mx-auto leading-relaxed">
-            Mariana would do this on a Google Sheet at 2am tonight. The inputs
+            booker would do this on a Google Sheet at 2am tonight. The inputs
             are below — but the math doesn&apos;t happen here.
           </p>
         </CardContent>
@@ -406,7 +409,7 @@ function UnsupportedDeal({
           <div>
             <CardTitle>What the system has</CardTitle>
             <CardDescription>
-              The inputs Mariana would pull together to settle this show.
+              The inputs booker would pull together to settle this show.
               They&apos;re here — but disconnected from the deal terms.
             </CardDescription>
           </div>
@@ -443,7 +446,7 @@ function UnsupportedDeal({
           {deal?.dealNotesFreetext && (
             <div className="mt-6">
               <div className="eyebrow text-[10px] text-ink-500 mb-2">
-                Deal notes (free text — what Mariana actually trusts)
+                Deal notes (free text — what booker actually trusts)
               </div>
               <div className="text-[12.5px] text-ink-800 bg-canvas-soft rounded-lg p-4 ring-1 ring-ink-200/60 leading-relaxed">
                 {deal.dealNotesFreetext}
@@ -461,7 +464,7 @@ function UnsupportedDeal({
             <div>
               <CardTitle>Actually settled (off-platform)</CardTitle>
               <CardDescription>
-                Mariana ran this in a spreadsheet. Here&apos;s the result that
+                booker ran this in a spreadsheet. Here&apos;s the result that
                 was logged back into Greenroom afterward.
               </CardDescription>
             </div>
@@ -487,42 +490,317 @@ function UnsupportedDeal({
 
 function SupportedSettlement({
   calc,
+  deal,
   existingSettlement,
 }: {
-  calc: Extract<
-    ReturnType<typeof calculateSettlement>,
-    { supported: true }
-  >;
-  existingSettlement: NonNullable<
-    Awaited<ReturnType<typeof getShowById>>
-  >["settlement"];
+  calc: Extract<ReturnType<typeof calculateSettlement>, { supported: true }>;
+  deal: Deal;
+  existingSettlement: NonNullable<Awaited<ReturnType<typeof getShowById>>>["settlement"];
 }) {
+  const bonuses = parseBonuses(deal);
+
+  // Parse key steps
+  const ratchetStep = calc.steps.find(s => s.label === "Ratchet applied" || s.label === "Ratchet");
+  const pctStep = calc.steps.find(s => s.label.startsWith("× "));
+  const guaranteeStep = calc.steps.find(s => s.label === "Guarantee (floor)");
+  const feesStep = calc.steps.find(s => s.label === "Ticketing fees");
+  const expensesStep = calc.steps.find(s => s.label.startsWith("Pass-through expenses"));
+  const hardDeductsStep = calc.steps.find(s => s.label === "Hard deducts");
+  const netStep = calc.steps.find(s => s.label === "Net box office");
+
+  // Winner detection (vs deals)
+  const pctWins = pctStep?.note === "← wins";
+
+  // Cap detection
+  const expCapped = deal.expenseCap != null && calc.totalExpenses > deal.expenseCap;
+
+  // Walk pot bonus object for threshold display
+  const wpBonus = bonuses.find(b => b.type === "walk_pot")
+    ?? bonuses.find(b => b.type === "gross_threshold" && (b as { stacks?: boolean }).stacks);
+  const wpThreshold = (wpBonus as { threshold?: number } | undefined)?.threshold ?? 0;
+
+  // Separate walk pot from flat bonuses (vs deals include walkPot.applied as bonusesApplied[0])
+  const hasWalkPot = deal.dealType === "vs" && calc.walkPotPayout > 0;
+  const walkPotApplied = hasWalkPot ? calc.bonusesApplied[0] : null;
+  const flatBonuses = hasWalkPot ? calc.bonusesApplied.slice(1) : calc.bonusesApplied;
+  const bonusTotal = flatBonuses.reduce((s, b) => s + b.amount, 0);
+
+  // For door deal: payout before bonuses
+  const doorBasePayout = deal.dealType === "door" ? calc.totalToArtist - bonusTotal : null;
+
   return (
     <>
-      {/* Hero number */}
-      <div className="text-center py-10 mb-2">
-        <div className="eyebrow text-[10px] text-ink-400 mb-3">Total to artist</div>
-        <div
-          className="text-[72px] font-mono tabular font-bold text-ink-900 leading-none"
-          style={{ letterSpacing: "-0.03em" }}
-        >
-          {formatMoney(calc.totalToArtist)}
+      {/* Warnings */}
+      {calc.warnings.length > 0 && (
+        <div className="space-y-3">
+          {calc.warnings.map((w, i) => (
+            <div key={i} className={`rounded-lg border p-4 flex gap-3 ${
+              w.type === "net_negative" ? "border-rose-200/60 bg-rose-50/40" : "border-amber-200/60 bg-amber-50/40"
+            }`}>
+              {w.type === "net_negative"
+                ? <AlertTriangle className="h-4 w-4 text-rose-700 mt-0.5 shrink-0" />
+                : <AlertCircle className="h-4 w-4 text-amber-700 mt-0.5 shrink-0" />}
+              <p className={`text-[12.5px] leading-relaxed ${w.type === "net_negative" ? "text-rose-800" : "text-amber-800"}`}>
+                {w.message}
+              </p>
+            </div>
+          ))}
         </div>
-        {existingSettlement && (
-          <div className="mt-3">
-            {existingSettlement.status === "paid" ? (
-              <PlainBadge variant="brand">Paid</PlainBadge>
-            ) : existingSettlement.status === "signed" ||
-              existingSettlement.status === "finalized" ? (
-              <PlainBadge variant="brand">Signed</PlainBadge>
-            ) : existingSettlement.status === "disputed" ? (
-              <PlainBadge variant="rose">Disputed</PlainBadge>
-            ) : null}
+      )}
+
+      {/* Section 1: Gross → Net cascade (all except flat) */}
+      {deal.dealType !== "flat" && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Box office</CardTitle>
+          </CardHeader>
+          <CardContent className="divide-y divide-ink-100/80">
+            <WRow label="Gross box office" value={formatMoney(calc.grossBoxOffice)} />
+            {calc.compCredit > 0 && (
+              <WRow label="Comps toward gross" value={`+ ${formatMoney(calc.compCredit)}`} positive />
+            )}
+            {calc.compCredit > 0 && (
+              <WRow label="Adjusted gross" value={formatMoney(calc.adjustedGross)} />
+            )}
+            {feesStep && (
+              <WRow label="Platform fees" value={`– ${formatMoney(Math.abs(feesStep.value))}`} deduct />
+            )}
+            {expensesStep && (
+              <WRow
+                label="Pass-through expenses"
+                value={`– ${formatMoney(Math.abs(expensesStep.value))}`}
+                deduct
+                badge={expCapped ? `capped at ${formatMoney(deal.expenseCap!)}` : undefined}
+              />
+            )}
+            {hardDeductsStep && (
+              <WRow label="Marketing recoup (hard deduct)" value={`– ${formatMoney(Math.abs(hardDeductsStep.value))}`} deduct />
+            )}
+            {netStep && (
+              <WRow label="Net box office" value={formatMoney(netStep.value)} highlighted />
+            )}
+            {deal.dealType === "door" && doorBasePayout != null && (
+              <WRow label="Net to artist" value={formatMoney(doorBasePayout)} highlighted />
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Section 2: Deal math */}
+      {deal.dealType === "flat" && (
+        <Card>
+          <CardHeader><CardTitle>Deal</CardTitle></CardHeader>
+          <CardContent>
+            <WRow label="Flat guarantee" value={formatMoney(deal.guaranteeAmount ?? 0)} />
+            <p className="text-[11.5px] text-ink-400 mt-2">
+              Not affected by ticket sales, fees, or expenses.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {(deal.dealType === "percentage_of_gross" || deal.dealType === "percentage_of_net") && pctStep && (
+        <Card>
+          <CardHeader><CardTitle>Deal math</CardTitle></CardHeader>
+          <CardContent className="divide-y divide-ink-100/80">
+            {ratchetStep?.note && (
+              <div className="py-2.5">
+                <div className="text-[11.5px] text-amber-800 bg-amber-50/70 rounded-md px-3 py-2 border border-amber-200/60">
+                  {ratchetStep.note}
+                </div>
+              </div>
+            )}
+            <WRow label={pctStep.label} value={formatMoney(pctStep.value)} />
+          </CardContent>
+        </Card>
+      )}
+
+      {deal.dealType === "vs" && pctStep && guaranteeStep && (
+        <Card>
+          <CardHeader><CardTitle>Deal comparison</CardTitle></CardHeader>
+          <CardContent>
+            {ratchetStep?.note && (
+              <div className="mb-4 text-[11.5px] text-amber-800 bg-amber-50/70 rounded-md px-3 py-2 border border-amber-200/60">
+                {ratchetStep.note}
+              </div>
+            )}
+            <div className="grid grid-cols-[1fr_auto_1fr] gap-4 items-stretch">
+              {/* Guarantee side */}
+              <div className={`rounded-xl border-2 p-5 transition-all ${!pctWins ? "border-brand-600 bg-brand-50/30" : "border-ink-200/50 opacity-50"}`}>
+                <div className="text-[10.5px] font-medium text-ink-500 uppercase tracking-wider mb-3">Guarantee</div>
+                <div className="text-[30px] font-mono tabular font-semibold text-ink-900 leading-none" style={{ letterSpacing: "-0.02em" }}>
+                  {formatMoney(deal.guaranteeAmount ?? 0)}
+                </div>
+                <div className="text-[11.5px] text-ink-400 mt-2">Fixed floor</div>
+                {!pctWins && <div className="mt-3 text-[11px] font-semibold text-brand-700 uppercase tracking-wider">Wins</div>}
+              </div>
+
+              {/* VS divider */}
+              <div className="flex items-center justify-center">
+                <div className="text-[11px] font-medium text-ink-400 bg-canvas-soft rounded-full w-8 h-8 flex items-center justify-center ring-1 ring-ink-200/60">
+                  vs
+                </div>
+              </div>
+
+              {/* Percentage side */}
+              <div className={`rounded-xl border-2 p-5 transition-all ${pctWins ? "border-brand-600 bg-brand-50/30" : "border-ink-200/50 opacity-50"}`}>
+                <div className="text-[10.5px] font-medium text-ink-500 uppercase tracking-wider mb-3">
+                  {(deal.percentage! * 100).toFixed(0)}% of {deal.percentageBasis ?? "gross"}
+                </div>
+                <div className="text-[30px] font-mono tabular font-semibold text-ink-900 leading-none" style={{ letterSpacing: "-0.02em" }}>
+                  {formatMoney(pctStep.value)}
+                </div>
+                <div className="text-[11.5px] text-ink-400 mt-2">
+                  {deal.percentageBasis === "net"
+                    ? `Net ${formatMoney(calc.netBoxOffice)}`
+                    : `Gross ${formatMoney(calc.adjustedGross)}`} × {(deal.percentage! * 100).toFixed(0)}%
+                </div>
+                {pctWins && <div className="mt-3 text-[11px] font-semibold text-brand-700 uppercase tracking-wider">Wins</div>}
+              </div>
+            </div>
+
+            <div className="mt-5 pt-4 border-t border-ink-100/80 flex items-baseline justify-between">
+              <span className="text-[12.5px] text-ink-500">Artist receives the higher of the two</span>
+              <span className="text-[15px] font-mono tabular font-semibold text-ink-900">
+                {formatMoney(Math.max(deal.guaranteeAmount ?? 0, pctStep.value))}
+              </span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Section 3: Walk pot (vs deals only) */}
+      {deal.dealType === "vs" && wpBonus && (
+        calc.walkPotPayout > 0 ? (
+          <div className="rounded-xl border-l-[3px] border-amber-400 bg-amber-50/50 p-5">
+            <div className="text-[11.5px] font-semibold text-amber-800 mb-2 uppercase tracking-wider">Walk pot triggered</div>
+            {walkPotApplied?.reason && (
+              <div className="text-[12.5px] text-amber-700 mb-4 font-mono">{walkPotApplied.reason}</div>
+            )}
+            <div className="flex items-baseline justify-between">
+              <span className="text-[13px] text-amber-800 font-medium">Walk pot payout</span>
+              <span className="text-[20px] font-mono tabular font-semibold text-amber-900">
+                +{formatMoney(calc.walkPotPayout)}
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-ink-200/60 bg-canvas-soft px-5 py-3">
+            <div className="text-[12px] text-ink-400">
+              Walk pot threshold {formatMoney(wpThreshold)} — gross did not exceed it. Payout: $0
+            </div>
+          </div>
+        )
+      )}
+
+      {/* Section 4: Flat bonuses applied */}
+      {flatBonuses.length > 0 && (
+        <Card>
+          <CardHeader><CardTitle>Bonuses triggered</CardTitle></CardHeader>
+          <CardContent className="divide-y divide-ink-100/80">
+            {flatBonuses.map((b, i) => (
+              <div key={i} className="py-3 flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-[13px] text-ink-700">{b.label}</div>
+                  <div className="text-[11.5px] text-ink-400 mt-0.5">{b.reason}</div>
+                </div>
+                <div className="text-[14px] font-mono tabular font-medium text-brand-700 shrink-0">
+                  +{formatMoney(b.amount)}
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Section 5: Total / winner box */}
+      <div className="rounded-xl border-2 border-brand-600 bg-brand-50/25 p-6">
+        {/* Breakdown lines */}
+        {(deal.dealType === "vs" || calc.walkPotPayout > 0 || bonusTotal > 0 || calc.totalHardDeducts > 0) && (
+          <div className="space-y-2 mb-5 pb-5 border-b border-brand-200/50">
+            {deal.dealType === "flat" && calc.totalHardDeducts > 0 && (
+              <div className="flex items-baseline justify-between">
+                <span className="text-[13px] text-ink-600">Flat guarantee</span>
+                <span className="text-[14px] font-mono tabular text-ink-800">
+                  {formatMoney(deal.guaranteeAmount ?? 0)}
+                </span>
+              </div>
+            )}
+            {deal.dealType === "percentage_of_gross" && calc.totalHardDeducts > 0 && pctStep && (
+              <div className="flex items-baseline justify-between">
+                <span className="text-[13px] text-ink-600">{pctStep.label}</span>
+                <span className="text-[14px] font-mono tabular text-ink-800">
+                  {formatMoney(pctStep.value)}
+                </span>
+              </div>
+            )}
+            {deal.dealType === "vs" && (
+              <div className="flex items-baseline justify-between">
+                <span className="text-[13px] text-ink-600">
+                  {pctWins
+                    ? `${(deal.percentage! * 100).toFixed(0)}% of ${deal.percentageBasis} wins`
+                    : "Guarantee wins"}
+                </span>
+                <span className="text-[14px] font-mono tabular text-ink-800">
+                  {formatMoney(pctWins ? (pctStep?.value ?? 0) : (deal.guaranteeAmount ?? 0))}
+                </span>
+              </div>
+            )}
+            {calc.walkPotPayout > 0 && (
+              <div className="flex items-baseline justify-between">
+                <span className="text-[13px] text-ink-600">Walk pot bonus</span>
+                <span className="text-[14px] font-mono tabular text-brand-700">
+                  +{formatMoney(calc.walkPotPayout)}
+                </span>
+              </div>
+            )}
+            {bonusTotal > 0 && (
+              <div className="flex items-baseline justify-between">
+                <span className="text-[13px] text-ink-600">
+                  {flatBonuses.length === 1 ? flatBonuses[0].label : `Bonuses (${flatBonuses.length})`}
+                </span>
+                <span className="text-[14px] font-mono tabular text-brand-700">
+                  +{formatMoney(bonusTotal)}
+                </span>
+              </div>
+            )}
+            {calc.totalHardDeducts > 0 && (
+              <div className="flex items-baseline justify-between">
+                <span className="text-[13px] text-ink-600">Recoup deductions</span>
+                <span className="text-[14px] font-mono tabular text-rose-700">
+                  –{formatMoney(calc.totalHardDeducts)}
+                </span>
+              </div>
+            )}
           </div>
         )}
+
+        <div className="flex items-baseline justify-between gap-4">
+          <div>
+            <div className="text-[12px] text-ink-500 mb-1 uppercase tracking-wider font-medium">Total to artist</div>
+            {existingSettlement && (
+              <div className="mt-1">
+                {existingSettlement.status === "paid" ? (
+                  <PlainBadge variant="brand">Paid</PlainBadge>
+                ) : existingSettlement.status === "signed" || existingSettlement.status === "finalized" ? (
+                  <PlainBadge variant="brand">Signed</PlainBadge>
+                ) : existingSettlement.status === "disputed" ? (
+                  <PlainBadge variant="rose">Disputed</PlainBadge>
+                ) : null}
+              </div>
+            )}
+          </div>
+          <div
+            className="text-[52px] font-mono tabular font-bold text-ink-900 leading-none"
+            style={{ letterSpacing: "-0.03em" }}
+          >
+            {formatMoney(calc.totalToArtist)}
+          </div>
+        </div>
+
         {existingSettlement?.totalToArtist != null &&
           existingSettlement.totalToArtist !== calc.totalToArtist && (
-          <div className="text-[12px] text-ink-400 mt-2">
+          <div className="text-[11.5px] text-ink-400 mt-3 pt-3 border-t border-brand-200/50">
             Originally settled at{" "}
             <span className="font-mono tabular text-ink-600">
               {formatMoney(existingSettlement.totalToArtist)}
@@ -531,45 +809,7 @@ function SupportedSettlement({
         )}
       </div>
 
-      {/* Worksheet breakdown */}
-      <Card accent="brand">
-        <CardHeader>
-          <div>
-            <CardTitle>Settlement worksheet</CardTitle>
-            <CardDescription className="font-mono">
-              {calc.finalFormula}
-            </CardDescription>
-          </div>
-        </CardHeader>
-        <CardContent className="divide-y divide-ink-100/80">
-          <Row
-            label="Gross box office"
-            value={formatMoney(calc.grossBoxOffice)}
-          />
-          <Row label="Net box office" value={formatMoney(calc.netBoxOffice)} />
-          <Row
-            label="Total expenses (passed through)"
-            value={formatMoney(calc.totalExpenses)}
-          />
-          <div className="pt-3" />
-          {calc.steps.map((step, i) => (
-            <Row
-              key={i}
-              label={step.label}
-              value={formatMoney(step.value)}
-              note={step.note}
-            />
-          ))}
-          <div className="pt-3" />
-          <div className="flex items-baseline justify-between py-3 font-semibold">
-            <span className="text-[13px] text-ink-900">Total to artist</span>
-            <span className="text-[18px] font-mono tabular text-ink-900">
-              {formatMoney(calc.totalToArtist)}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
-
+      {/* Bonuses not triggered */}
       {calc.bonusesNotTriggered.length > 0 && (
         <Card>
           <CardHeader>
@@ -582,15 +822,10 @@ function SupportedSettlement({
           </CardHeader>
           <CardContent className="divide-y divide-ink-100/80">
             {calc.bonusesNotTriggered.map((b, i) => (
-              <div
-                key={i}
-                className="py-3 flex items-baseline justify-between gap-4"
-              >
+              <div key={i} className="py-3 flex items-baseline justify-between gap-4">
                 <div className="min-w-0">
                   <div className="text-[13px] text-ink-600">{b.label}</div>
-                  <div className="text-[11.5px] text-ink-400 mt-0.5">
-                    {b.reason}
-                  </div>
+                  <div className="text-[11.5px] text-ink-400 mt-0.5">{b.reason}</div>
                 </div>
                 <div className="text-[12.5px] text-ink-300 font-mono tabular line-through">
                   {formatMoney(b.amount)}
@@ -601,6 +836,48 @@ function SupportedSettlement({
         </Card>
       )}
     </>
+  );
+}
+
+function WRow({
+  label,
+  value,
+  deduct,
+  positive,
+  highlighted,
+  badge,
+}: {
+  label: string;
+  value: string;
+  deduct?: boolean;
+  positive?: boolean;
+  highlighted?: boolean;
+  badge?: string;
+}) {
+  return (
+    <div className={`flex items-baseline justify-between gap-4 py-2.5 ${
+      highlighted ? "bg-canvas-soft rounded-lg px-3 -mx-3 my-1" : ""
+    }`}>
+      <div className="flex items-center gap-2 min-w-0">
+        <span className="text-[13px] text-ink-600 truncate">{label}</span>
+        {badge && (
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 ring-1 ring-amber-200/60 shrink-0">
+            {badge}
+          </span>
+        )}
+      </div>
+      <span className={`text-[13.5px] font-mono tabular shrink-0 ${
+        deduct
+          ? "text-rose-700"
+          : positive
+          ? "text-brand-700"
+          : highlighted
+          ? "text-ink-900 font-semibold"
+          : "text-ink-900"
+      }`}>
+        {value}
+      </span>
+    </div>
   );
 }
 
@@ -639,7 +916,12 @@ function RecoupsSection({ recoups }: { recoups: Recoup[] }) {
                 {RECOUP_LABELS[r.category]}
               </div>
             </div>
-            <div>
+            <div className="flex items-center gap-1.5">
+              {r.treatment === "in_pool" ? (
+                <PlainBadge variant="default">In pool</PlainBadge>
+              ) : (
+                <PlainBadge variant="default">Hard deduct</PlainBadge>
+              )}
               {r.status === "disputed" ? (
                 <PlainBadge variant="rose">Disputed</PlainBadge>
               ) : r.status === "withdrawn" ? (
@@ -678,7 +960,7 @@ function SignoffSection({ settlement }: { settlement: Settlement }) {
         {settlement.notes && (
           <div>
             <div className="eyebrow text-[10px] text-ink-500 mb-2">
-              Mariana&apos;s settlement notes
+              booker&apos;s settlement notes
             </div>
             <div className="text-[12.5px] text-ink-800 bg-canvas-soft rounded-lg p-4 ring-1 ring-ink-200/60 leading-relaxed">
               {settlement.notes}
@@ -690,28 +972,3 @@ function SignoffSection({ settlement }: { settlement: Settlement }) {
   );
 }
 
-function Row({
-  label,
-  value,
-  note,
-}: {
-  label: string;
-  value: string;
-  note?: string;
-}) {
-  return (
-    <div className="flex items-baseline justify-between py-2.5">
-      <div>
-        <div className="text-[13px] text-ink-600">{label}</div>
-        {note && (
-          <div className="text-[11.5px] text-ink-400 mt-0.5 max-w-md leading-snug">
-            {note}
-          </div>
-        )}
-      </div>
-      <div className="text-[13.5px] text-ink-900 font-mono tabular">
-        {value}
-      </div>
-    </div>
-  );
-}

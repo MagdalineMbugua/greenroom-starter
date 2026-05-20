@@ -14,9 +14,11 @@ import {
   expenses,
   settlements,
   venues,
+  dealConfirmations,
   type Recoup,
+  type DealConfirmation,
 } from "@/db/schema";
-import { desc, asc, eq, sql, lte } from "drizzle-orm";
+import { desc, asc, eq, sql, lte, inArray } from "drizzle-orm";
 
 function todayDateString(): string {
   const d = new Date();
@@ -230,3 +232,57 @@ export async function getReports() {
 }
 
 export type Reports = Awaited<ReturnType<typeof getReports>>;
+
+// -------- Deal confirmations --------
+
+export async function getConfirmationByToken(token: string) {
+  const rows = await db
+    .select({
+      confirmation: dealConfirmations,
+      deal: deals,
+      show: shows,
+      artist: artists,
+      agent: agents,
+      venue: venues,
+    })
+    .from(dealConfirmations)
+    .innerJoin(deals, eq(dealConfirmations.dealId, deals.id))
+    .innerJoin(shows, eq(deals.showId, shows.id))
+    .innerJoin(artists, eq(shows.artistId, artists.id))
+    .leftJoin(agents, eq(artists.agentId, agents.id))
+    .innerJoin(venues, eq(shows.venueId, venues.id))
+    .where(eq(dealConfirmations.token, token));
+
+  if (rows.length === 0) return null;
+  return rows[0];
+}
+
+export async function getConfirmationsForDeal(dealId: string) {
+  return db
+    .select()
+    .from(dealConfirmations)
+    .where(eq(dealConfirmations.dealId, dealId))
+    .orderBy(desc(dealConfirmations.sentAt));
+}
+
+export async function getConfirmationsForDeals(dealIds: string[]): Promise<DealConfirmation[]> {
+  if (dealIds.length === 0) return [];
+  return db
+    .select()
+    .from(dealConfirmations)
+    .where(inArray(dealConfirmations.dealId, dealIds));
+}
+
+export type ConfirmationAggregateStatus = "not_sent" | "pending" | "confirmed" | "flagged" | "expired";
+
+export function aggregateConfirmationStatus(
+  confirmations: DealConfirmation[],
+  dealVersion: number,
+): ConfirmationAggregateStatus {
+  const current = confirmations.filter(c => c.dealVersion === dealVersion);
+  if (current.length === 0) return "not_sent";
+  if (current.some(c => c.status === "flagged")) return "flagged";
+  if (current.some(c => c.status === "pending")) return "pending";
+  if (current.every(c => c.status === "confirmed")) return "confirmed";
+  return "expired";
+}
